@@ -16,7 +16,9 @@ const PORT = process.env.PORT || 4000;
 
 // --- YAPILANDIRMA ---
 // Yerel DNS sorunlarını aşan, SRV içermeyen direkt bağlantı linki
-const MONGODB_URI = "mongodb://caganyesilyurt1967_db_user:jyNDGBQ91p1NcMii@ac-7169zvp-shard-00-00.ht9oi5d.mongodb.net:27017,ac-7169zvp-shard-00-01.ht9oi5d.mongodb.net:27017,ac-7169zvp-shard-00-02.ht9oi5d.mongodb.net:27017/blockblast?ssl=true&replicaSet=atlas-7e7g3b-shard-0&authSource=admin&retryWrites=true&w=majority";
+// ESKİ HALİ: const uri = "mongodb+srv://kullanici:SIFRE@cluster0...";
+// YENİ HALİ:
+const uri = process.env.MONGODB_URI;
 
 // Hile koruması için gizli anahtar
 const CLIENT_SALT = "CHANGE_ME_SUPER_SECRET_SALT";
