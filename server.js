@@ -1,112 +1,63 @@
-import express from "express";
-import mongoose from "mongoose";
-import cors from "cors";
-import crypto from "crypto";
-import dns from "node:dns";
-
-// DNS hatalarını aşmak için IPv4 zorlaması (Altın kural)
-dns.setDefaultResultOrder('ipv4first');
-
-import "./models/User.js";
-import Score from "./models/Score.js";
-import User from "./models/User.js";
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 4000;
 
-// --- YAPILANDIRMA ---
-// Yerel DNS sorunlarını aşan, SRV içermeyen direkt bağlantı linki
-// ESKİ HALİ: const uri = "mongodb+srv://kullanici:SIFRE@cluster0...";
-// YENİ HALİ:
-const uri = process.env.MONGODB_URI;
-
-// Hile koruması için gizli anahtar
-const CLIENT_SALT = "CHANGE_ME_SUPER_SECRET_SALT";
-
-// --- HİLE ENGELLEME: Hız Sınırı (Rate Limiting) ---
-const WINDOW_MS = 10_000; 
-const MAX_SUBMISSIONS_PER_WINDOW = 20; 
-const BLOCK_DURATION_MS = 5 * 60_000; 
-const ipSubmissionMap = new Map();
-
-function getClientIp(req) {
-  return req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() || req.socket.remoteAddress || "unknown";
-}
-
-function checkRateLimit(req, res) {
-  const ip = getClientIp(req);
-  const now = Date.now();
-  let info = ipSubmissionMap.get(ip);
-  if (!info) { info = { count: 0, windowStart: now, blockedUntil: 0 }; ipSubmissionMap.set(ip, info); }
-  if (info.blockedUntil && now < info.blockedUntil) {
-    return { blocked: true, response: res.status(429).json({ ok: false, error: "Engellendiniz." }) };
-  }
-  if (now - info.windowStart > WINDOW_MS) { info.windowStart = now; info.count = 0; }
-  info.count += 1;
-  if (info.count > MAX_SUBMISSIONS_PER_WINDOW) {
-    info.blockedUntil = now + BLOCK_DURATION_MS;
-    return { blocked: true, response: res.status(429).json({ ok: false, error: "Şüpheli aktivite!" }) };
-  }
-  return { blocked: false };
-}
-
-// --- MONGODB BAĞLANTISI ---
-async function connectDatabase() {
-  try {
-    await mongoose.connect(MONGODB_URI);
-    console.log("✅ MongoDB bağlantısı kuruldu!");
-  } catch (err) {
-    console.error("❌ Bağlantı hatası:", err.message);
-  }
-}
-connectDatabase();
-
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// --- HİLE ENGELLEME: GÜVENLİK SİSTEMLERİ ---
-function verifyScoreHash({ score, timestamp, hash }) {
-  if (typeof score !== "number" || !Number.isFinite(score)) return false;
-  const payload = `${score}:${timestamp}:${CLIENT_SALT}`;
-  const expectedHash = crypto.createHash("sha256").update(payload).digest("hex");
-  return expectedHash === hash;
-}
+// MongoDB Bağlantısı (Vercel Environment Variables'dan çeker)
+const uri = process.env.MONGODB_URI;
 
-function isScorePlausible({ score, user }) {
-  if (!Number.isInteger(score) || score < 0 || score > 10000000) return false;
-  if (!user || !user.lastSubmissionAt || user.lastScore == null) return true;
-  const elapsedMs = Date.now() - user.lastSubmissionAt.getTime();
-  const scoreDelta = score - user.lastScore;
-  const pointsPerSecond = scoreDelta / Math.max(elapsedMs / 1000, 1);
-  return pointsPerSecond <= 10000; 
-}
+mongoose.connect(uri)
+  .then(() => console.log("MongoDB bağlantısı başarılı!"))
+  .catch(err => console.error("MongoDB bağlantı hatası:", err));
 
-// --- ROTALAR ---
-app.get("/api/leaderboard", async (req, res) => {
-  try {
-    const users = await User.find({}).sort({ bestScore: -1 }).limit(10).select("username bestScore -_id");
-    res.json({ ok: true, leaderboard: users });
-  } catch (err) { res.status(500).json({ ok: false }); }
+// Modellerini İçeri Aktar (Dosyalar en dışta olduğu için yol bu şekilde)
+const User = require('./User');
+const Score = require('./Score');
+
+// --- ROTALAR (ROUTES) ---
+
+// 1. Test Rotası (Çalışıp çalışmadığını anlamak için)
+app.get('/', (req, res) => {
+  res.send('Blok Patlatma Sunucusu Aktif! /leaderboard adresine gitmeyi dene.');
 });
 
-app.post("/api/submit-score", async (req, res) => {
-  const rate = checkRateLimit(req, res);
-  if (rate.blocked) return rate.response;
+// 2. Skorları Getir (Leaderboard)
+app.get('/leaderboard', async (req, res) => {
   try {
-    const { username, score, timestamp, hash } = req.body || {};
-    if (!verifyScoreHash({ score, timestamp, hash })) return res.status(400).json({ ok: false, error: "İmza hatası!" });
+    const scores = await Score.find().populate('user').sort({ score: -1 }).limit(10);
+    res.json(scores);
+  } catch (err) {
+    res.status(500).json({ error: "Skorlar alınamadı." });
+  }
+});
+
+// 3. Yeni Skor Kaydet
+app.post('/add-score', async (req, res) => {
+  const { username, score } = req.body;
+  try {
     let user = await User.findOne({ username });
-    if (!user) user = new User({ username, bestScore: 0 });
-    if (!isScorePlausible({ score, user })) return res.status(400).json({ ok: false, error: "Geçersiz skor!" });
-    if (score > (user.bestScore || 0)) user.bestScore = score;
-    user.lastSubmissionAt = new Date();
-    user.lastScore = score;
-    await user.save();
-    await Score.create({ user: user._id, value: score });
-    res.json({ ok: true, bestScore: user.bestScore });
-  } catch (err) { res.status(500).json({ ok: false }); }
+    if (!user) {
+      user = new User({ username });
+      await user.save();
+    }
+    const newScore = new Score({ user: user._id, score });
+    await newScore.save();
+    res.json({ message: "Skor başarıyla kaydedildi!" });
+  } catch (err) {
+    res.status(500).json({ error: "Skor kaydedilemedi." });
+  }
 });
 
+// Vercel için port ayarı
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 API çalışıyor: Port ${PORT}`);
+  console.log(`Sunucu ${PORT} portunda çalışıyor.`);
 });
+
+module.exports = app;
